@@ -1,7 +1,5 @@
 package main
 
-import "fmt"
-
 type interpreter struct {
     procedures map[procEntry]procedure
 }
@@ -20,15 +18,13 @@ func NewInterpreter(procedures []procedure) *interpreter {
 func (i *interpreter) interpret(s string) []map[string]expression {
     p, b := MustParseProcesses(s)
     // parsing assigned some variables to vars in query
-    vc := len(b)
-    var substitution *substitution
+    st := state{vc: len(b)}
 
     // TODO: multiple processes in query
     input := arriveInput{
         p: proc(p[0].functor, p[0].arity()),
         args: p[0].args,
-        variablecounter: vc,
-        substitution: substitution,
+        state: st,
     }
     ans := i.arrive(input)
     if len(ans) == 0 {
@@ -38,65 +34,64 @@ func (i *interpreter) interpret(s string) []map[string]expression {
     // TODO: multiple possible bindings in answer
     onlyAnswer := ans[0]
     for s, v := range b {
-        e, ok := onlyAnswer.Lookup(v)
+        e, ok := onlyAnswer.sub.get(v)
         if !ok {
             out[s] = v
             continue
         }
-        e = onlyAnswer.walk(e)
+        e = onlyAnswer.sub.walkstar(e)
         out[s] = e
     }
     return []map[string]expression{out}
+}
+
+type state struct {
+    sub *substitution
+    vo  int // variable offset
+    vc  int // variable counter
 }
 
 type arriveInput struct {
     p procEntry
     args []expression
     cont []frame
-    variablecounter int
-    substitution *substitution
+    state state
 }
 
-// TODO: should sub/vc be part of frame?
-// should executeInput take a frame too?
 type frame struct {
-    pc          []instruction
-    xr          xrTable
+    pc  []instruction
+    xr  xrTable
+    vo  int
 }
 
-func (i *interpreter) arrive(in arriveInput) []*substitution {
-    fmt.Println("ARRIVE", in)
+func (i *interpreter) arrive(in arriveInput) []state {
     proc, ok := i.procedures[in.p]
     if !ok {
         return i.arriveBuiltin(in)
     }
-    ans := []*substitution{}
-    offset := in.variablecounter
+    ans := []state{}
+    st := in.state
     for _, c := range proc.clauses {
+        st.vo = in.state.vc
+        st.vc = in.state.vc + c.numVars
         execInput := executeInput{
             pc: c.bytecodes,
             xr: c.xrTable,
             cont: in.cont,
             args: in.args,
-            varOffset: offset,
-            // TODO: varcounter needs to take into account fresh vars
-            variablecounter: in.variablecounter + c.numVars + 100,
-            substitution: in.substitution,
+            state: st,
         }
-        // TODO: offset needs to take into account fresh vars minted in execution
-        offset += c.numVars
         b := i.execute(execInput)
         ans = append(ans, b...)
     }
     return ans
 }
 
-func (i *interpreter) arriveBuiltin(in arriveInput) []*substitution {
+func (i *interpreter) arriveBuiltin(in arriveInput) []state {
     // TODO handle builtin call
     execInput := executeInput{
         cont: in.cont,
-        variablecounter: in.variablecounter,
-        substitution: in.substitution,
+        state: in.state,
     }
     return i.executeExit(execInput)
 }
@@ -108,9 +103,7 @@ type executeInput struct {
     args []expression
     stack [][]expression
     queue []expression
-    varOffset int
-    variablecounter int
-    substitution *substitution
+    state state
 }
 
 // Const/Var/Functor have two modes: matching args (downwards) and creating args (upwards)
@@ -118,8 +111,7 @@ type executeInput struct {
 // Otherwise we will build them up in queue. The paper uses difference lists here (!)
 // The paper also uses stack both as a stack of lists and as a queue of args!
 
-func (i *interpreter) execute(in executeInput) []*substitution {
-    fmt.Println("EXECUTE", in)
+func (i *interpreter) execute(in executeInput) []state {
     if len(in.pc) < 1 {
         panic("executing empty instruction list")
     }
@@ -146,7 +138,7 @@ func (i *interpreter) execute(in executeInput) []*substitution {
     return nil
 }
 
-func (i *interpreter) executeConst(in executeInput) []*substitution {
+func (i *interpreter) executeConst(in executeInput) []state {
     if len(in.pc) < 1 {
         panic("CONST without xr pointer")
     }
@@ -168,9 +160,9 @@ func (i *interpreter) executeConst(in executeInput) []*substitution {
     var ok bool
     switch t := x.(type) {
     case integer:
-        sub, ok = in.substitution.unify(in.args[0], number(t))
+        sub, ok = in.state.sub.unify(in.args[0], number(t))
     case atom:
-        sub, ok = in.substitution.unify(in.args[0], symbol(t))
+        sub, ok = in.state.sub.unify(in.args[0], symbol(t))
     default:
         panic("CONST on nonatom")
     }
@@ -178,30 +170,30 @@ func (i *interpreter) executeConst(in executeInput) []*substitution {
         return nil
     }
     in.args = in.args[1:]
-    in.substitution = sub
+    in.state.sub = sub
     return i.execute(in)
 }
 
-func (i *interpreter) executeVar(in executeInput) []*substitution {
+func (i *interpreter) executeVar(in executeInput) []state {
     if len(in.pc) < 1 {
         panic("VAR without pointer")
     }
-    v := variable(in.varOffset + int(in.pc[0]))
+    v := variable(in.state.vo + int(in.pc[0]))
     in.pc = in.pc[1:]
     if len(in.args) == 0 {
         in.queue = append(in.queue, v)
         return i.execute(in)
     }
-    sub, ok := in.substitution.unify(in.args[0], v)
+    sub, ok := in.state.sub.unify(in.args[0], v)
     if !ok {
         return nil
     }
     in.args = in.args[1:]
-    in.substitution = sub
+    in.state.sub = sub
     return i.execute(in)
 }
 
-func (i *interpreter) executeFunctor(in executeInput) []*substitution {
+func (i *interpreter) executeFunctor(in executeInput) []state {
     if len(in.pc) < 1 {
         panic("FUNCTOR without xr pointer")
     }
@@ -209,7 +201,7 @@ func (i *interpreter) executeFunctor(in executeInput) []*substitution {
     in.pc = in.pc[1:]
     args := make([]expression, x.arity)
     for n:=0; n<x.arity; n++ {
-        args[n] = variable(in.variablecounter + n)
+        args[n] = variable(in.state.vc + n)
     }
     p := process{
         functor: x.name,
@@ -221,18 +213,18 @@ func (i *interpreter) executeFunctor(in executeInput) []*substitution {
         in.args = args
         return i.execute(in)
     }
-    sub, ok := in.substitution.unify(in.args[0], p)
+    sub, ok := in.state.sub.unify(in.args[0], p)
     if !ok {
         return nil
     }
     in.stack = append([][]expression{in.args[1:]}, in.stack...) 
     in.args = args
-    in.substitution = sub
-    in.variablecounter += x.arity
+    in.state.sub = sub
+    in.state.vc += x.arity
     return i.execute(in)
 }
 
-func (i *interpreter) executePop(in executeInput) []*substitution {
+func (i *interpreter) executePop(in executeInput) []state {
     if len(in.args) > 0 {
         panic("POP with nonempty args")
     }
@@ -244,14 +236,14 @@ func (i *interpreter) executePop(in executeInput) []*substitution {
     return i.execute(in)
 }
 
-func (i *interpreter) executeEnter(in executeInput) []*substitution {
+func (i *interpreter) executeEnter(in executeInput) []state {
     if len(in.args) > 0 || len(in.stack) > 0 {
         return nil  // failure to match, nonempty args/stack
     }
     return i.execute(in)
 }
 
-func (i *interpreter) executeCall(in executeInput) []*substitution {
+func (i *interpreter) executeCall(in executeInput) []state {
     if len(in.pc) < 1 {
         panic("CALL without xr pointer")
     }
@@ -260,14 +252,13 @@ func (i *interpreter) executeCall(in executeInput) []*substitution {
     arriveIn := arriveInput{
         p: x,
         args: in.queue,
-        cont: append([]frame{{in.pc, in.xr}}, in.cont...),
-        variablecounter: in.variablecounter,
-        substitution: in.substitution,
+        cont: append([]frame{{in.pc, in.xr, in.state.vo}}, in.cont...),
+        state: in.state,
     }
     return i.arrive(arriveIn)
 }
 
-func (i *interpreter) executeExit(in executeInput) []*substitution {
+func (i *interpreter) executeExit(in executeInput) []state {
     if len(in.pc) > 0 {
         panic("EXIT on nonempty instruction list")
     }
@@ -278,8 +269,9 @@ func (i *interpreter) executeExit(in executeInput) []*substitution {
         f, c := in.cont[0], in.cont[1:]
         in.pc = f.pc
         in.xr = f.xr
+        in.state.vo = f.vo
         in.cont = c
         return i.execute(in)
     }
-    return []*substitution{in.substitution}
+    return []state{in.state}
 }

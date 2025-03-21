@@ -23,5 +23,8 @@ func main() {
     i := NewInterpreter(procs)
     q := `append(cons(a, cons(b, nil)), cons(c, nil), L)`
     b := i.interpret(q)  // expect: L = cons(a, cons(b, cons(c, nil))).
-    fmt.Println(b)
+    for _, ans := range b {
+        fmt.Println("L =", ans["L"])
+    }
+    fmt.Println("fail")
 }

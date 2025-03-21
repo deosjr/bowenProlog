@@ -29,6 +29,12 @@ func (s *substitution) walkstar(u expression) expression {
 		return t
 	case list:
 		return list{head: s.walkstar(t.head), tail: s.walkstar(t.tail)}
+    case process:
+        args := make([]expression, len(t.args))
+        for i:=0; i<len(t.args); i++ {
+            args[i] = s.walkstar(t.args[i])
+        }
+        return process{functor: t.functor, args: args}
 	}
 	return v
 }
