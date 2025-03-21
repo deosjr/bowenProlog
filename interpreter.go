@@ -26,23 +26,21 @@ func (i *interpreter) interpret(s string) []map[string]expression {
         args: p[0].args,
         state: st,
     }
-    ans := i.arrive(input)
-    if len(ans) == 0 {
-        return []map[string]expression{}
-    }
-    out := map[string]expression{}
-    // TODO: multiple possible bindings in answer
-    onlyAnswer := ans[0]
-    for s, v := range b {
-        e, ok := onlyAnswer.sub.get(v)
-        if !ok {
-            out[s] = v
-            continue
+    out := []map[string]expression{}
+    for _, ans := range i.arrive(input) {
+        m := map[string]expression{}
+        for s, v := range b {
+            e, ok := ans.sub.get(v)
+            if !ok {
+                m[s] = v
+                continue
+            }
+            e = ans.sub.walkstar(e)
+            m[s] = e
         }
-        e = onlyAnswer.sub.walkstar(e)
-        out[s] = e
+        out = append(out, m)
     }
-    return []map[string]expression{out}
+    return out
 }
 
 type state struct {
